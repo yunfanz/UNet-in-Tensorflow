@@ -29,8 +29,9 @@ import time
 import os
 import pandas as pd
 import tensorflow as tf
-
-
+import numpy as np
+HH = 256
+WW = 256 #342
 def image_augmentation(image, mask):
     """Returns (maybe) augmented images
 
@@ -47,13 +48,13 @@ def image_augmentation(image, mask):
         image: Maybe augmented image (same shape as input `image`)
         mask: Maybe augmented mask (same shape as input `mask`)
     """
-    concat_image = tf.concat([image, mask], axis=-1)
+    #concat_image = tf.concat([image, mask], axis=-1)
 
-    maybe_flipped = tf.image.random_flip_left_right(concat_image)
-    maybe_flipped = tf.image.random_flip_up_down(concat_image)
+    #maybe_flipped = tf.image.random_flip_left_right(concat_image)
+    #maybe_flipped = tf.image.random_flip_up_down(concat_image)
 
-    image = maybe_flipped[:, :, :-1]
-    mask = maybe_flipped[:, :, -1:]
+    #image = maybe_flipped[:, :, :-1]
+    #mask = maybe_flipped[:, :, -1:]
 
     image = tf.image.random_brightness(image, 0.7)
     image = tf.image.random_hue(image, 0.3)
@@ -61,7 +62,7 @@ def image_augmentation(image, mask):
     return image, mask
 
 
-def get_image_mask(queue, augmentation=True):
+def get_image_mask(queue, session, augmentation=True):
     """Returns `image` and `mask`
 
     Input pipeline:
@@ -84,18 +85,19 @@ def get_image_mask(queue, augmentation=True):
     text_reader = tf.TextLineReader(skip_header_lines=1)
     _, csv_content = text_reader.read(queue)
 
-    image_path, mask_path = tf.decode_csv(csv_content, record_defaults=[[""], [""]])
-
-    image_file = tf.read_file(image_path)
-    mask_file = tf.read_file(mask_path)
-
-    image = tf.image.decode_jpeg(image_file, channels=3)
-    image.set_shape([640, 960, 3])
-    image = tf.cast(image, tf.float32)
-
-    mask = tf.image.decode_jpeg(mask_file, channels=1)
-    mask.set_shape([640, 960, 1])
-    mask = tf.cast(mask, tf.float32)
+    image_path = tf.decode_csv(csv_content, record_defaults=[[""]])
+    import IPython; IPython.embed()
+    f = np.load(image_path)
+    image = f['frame']
+    mask = f['mask']
+    print image.shape
+    if True:
+        image = image[:,86:]
+        mask = mask[:,86:]
+    image = image[..., np.newaxis]
+    mask = mask[..., np.newaxis]
+    image = tf.convert_to_tensor(image, np.float32)
+    mask = tf.convert_to_tensor(mask, tf.float32)
     mask = mask / (tf.reduce_max(mask) + 1e-7)
 
     if augmentation:
@@ -187,8 +189,8 @@ def make_unet(X, training):
         U-Net: Convolutional Networks for Biomedical Image Segmentation
         https://arxiv.org/abs/1505.04597
     """
-    net = X / 127.5 - 1
-    net = tf.layers.conv2d(net, 3, (1, 1), name="color_space_adjust")
+    net = X# / 127.5 - 1
+    #net = tf.layers.conv2d(net, 1, (1, 1), name="color_space_adjust")
     conv1, pool1 = conv_conv_pool(net, [8, 8], training, name=1)
     conv2, pool2 = conv_conv_pool(pool1, [16, 16], training, name=2)
     conv3, pool3 = conv_conv_pool(pool2, [32, 32], training, name=3)
@@ -253,7 +255,8 @@ def make_train_op(y_pred, y_true):
         train_op: minimize operation
     """
     loss = -IOU_(y_pred, y_true)
-
+    #loss = tf.nn.l2_loss(y_pred - y_true)
+    #loss = tf.reduce_sum(y_true * tf.log(y_pred))
     global_step = tf.train.get_or_create_global_step()
 
     optim = tf.train.AdamOptimizer()
@@ -267,12 +270,12 @@ def read_flags():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs",
-                        default=1,
+                        default=2,
                         type=int,
                         help="Number of epochs (default: 1)")
 
     parser.add_argument("--batch-size",
-                        default=4,
+                        default=16,
                         type=int,
                         help="Batch size (default: 4)")
 
@@ -294,17 +297,17 @@ def main(flags):
 
     test = pd.read_csv("./test.csv")
     n_test = test.shape[0]
-
     current_time = time.strftime("%m/%d/%H/%M/%S")
     train_logdir = os.path.join(flags.logdir, "train", current_time)
     test_logdir = os.path.join(flags.logdir, "test", current_time)
 
     tf.reset_default_graph()
-    X = tf.placeholder(tf.float32, shape=[None, 640, 960, 3], name="X")
-    y = tf.placeholder(tf.float32, shape=[None, 640, 960, 1], name="y")
+    X = tf.placeholder(tf.float32, shape=[None, HH, WW, 1], name="X")
+    y = tf.placeholder(tf.float32, shape=[None, HH, WW, 1], name="y")
     mode = tf.placeholder(tf.bool, name="mode")
 
     pred = make_unet(X, mode)
+    #pred = tf.sigmoid(pred)
 
     tf.add_to_collection("inputs", X)
     tf.add_to_collection("inputs", mode)
@@ -321,12 +324,14 @@ def main(flags):
     IOU_op = IOU_(pred, y)
     IOU_op = tf.Print(IOU_op, [IOU_op])
     tf.summary.scalar("IOU", IOU_op)
-
+    
+    sess = tf.Session()
+    print 1
     train_csv = tf.train.string_input_producer(['train.csv'])
     test_csv = tf.train.string_input_producer(['test.csv'])
-    train_image, train_mask = get_image_mask(train_csv)
-    test_image, test_mask = get_image_mask(test_csv, augmentation=False)
-
+    train_image, train_mask = get_image_mask(train_csv, sess)
+    test_image, test_mask = get_image_mask(test_csv, sess, augmentation=False)
+    print 2
     X_batch_op, y_batch_op = tf.train.shuffle_batch([train_image, train_mask],
                                                     batch_size=flags.batch_size,
                                                     capacity=flags.batch_size * 5,
@@ -340,7 +345,8 @@ def main(flags):
 
     summary_op = tf.summary.merge_all()
 
-    with tf.Session() as sess:
+    #with tf.Session() as sess:
+    for dummy in range(1):
         train_summary_writer = tf.summary.FileWriter(train_logdir, sess.graph)
         test_summary_writer = tf.summary.FileWriter(test_logdir)
 
